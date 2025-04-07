@@ -3,15 +3,15 @@
 // Version: v0.02
 // Developer: Dylan Li
 
-//#include "PMW3360.h"      // also contains SPI.h
+#include "WiFiNINA.h"
+#include "PMW3360.h"
 #include "USBMouseKeyboard.h"
 
+/// PMW3360 pins
 // Chip reset(active low) pin {Symbol: NRESET}
 #define NRES 8
-
 // Motion detect pin {Symbol: MOTION}
 #define MOT 9
-
 // SPI pins (Master = RP2040; Slave = PMW3360)
 #define SCLK 13
 #define MOSI 11
@@ -30,16 +30,11 @@
 #define ROT_CLK 16
 #define ROT_DT 15
 
-// RGB pins (on-board RGB led)
-#define RGB_TOGGLE 17
-
 // Master On/Off Switch pin
 #define POW 7
-#define ON HIGH
-#define OFF LOW
 
 // Wired/Wireless/Gyro Selection pin
-#define MODE_CHANGE 20      //************************************** will have to change this because A6 is not an interrupt pin (also fuck the RGB)
+#define MODE_CHANGE 17
 #define WIRED 0
 #define WIRELESS 1
 #define GYRO 2
@@ -50,16 +45,17 @@
 volatile int scroll_v = 0;
 
 /***************** PMW3360 globals ****************/
-//PMW3360 sensor;
-uint8_t currentMode = 0;        // start in wired mode
+PMW3360 sensor;
+int currentCPI;                     // avoids needing to check sensor register
+uint8_t currentMode = 0;            // start in wired mode
 
 /***************** other globals ******************/
 USBMouseKeyboard key_mouse;     // relative mouse
-PinStatus statePOW;
-PinStatus stateRGB;
+PinStatus last_statePOW;
 
 /***************** Function declarations ******************/
 void setup();
+void ISR_rotaryEncoder();
 
 
 /*****************************************************************************************************************************************/
@@ -83,7 +79,7 @@ int main(void)
         while (digitalRead(RIGHT) == LOW);
       }
     }
-    else if (digitalRead(MIDDLE) == LOW) {
+    if (digitalRead(MIDDLE) == LOW) {
       delay(20);
       if (digitalRead(MIDDLE) == LOW) {
         key_mouse.click(MOUSE_MIDDLE);
@@ -104,28 +100,76 @@ int main(void)
         while (digitalRead(NEXT) == LOW);
       }
     }
+    if (digitalRead(SPEED) == LOW) {
+      delay(20);
+      if (digitalRead(SPEED) == LOW) {
+        if (currentCPI == 1000) {
+          sensor.setCPI(8000);
+          currentCPI = 8000;
+        } else {
+          sensor.setCPI(1000);
+          currentCPI = 1000;
+        }
+        while (digitalRead(NEXT) == LOW);
+      }
+    }
 
-    if (scroll_v > 0) {
+    // Poll for mouse scrolls
+    if (scroll_v > 0) {       // clockwise = scroll down
       key_mouse.scroll(1);
       scroll_v = 0;
     }
-    else if (scroll_v < -0) {
+    else if (scroll_v < 0) { // counter-clockwise = scroll up
       key_mouse.scroll(-1);
       scroll_v = 0;
     }
-  }
-  // end of loop
+
+    // Poll for motion detected from PMW3360 sensor
+    PMW3360_DATA data = sensor.readBurst();
+    if(data.isOnSurface && data.isMotion)
+    {
+      key_mouse.move(data.dx, data.dy);
+    }
+
+    // Poll for change in switch state
+    if (last_statePOW != digitalRead(POW)) 
+    {
+      delay(100);     // debounce
+
+      // Check again
+      if (last_statePOW != digitalRead(POW)) {
+        last_statePOW = digitalRead(POW);
+
+        if (last_statePOW == LOW) {   // turn off sensor
+          //*****************************Code to turn off sensor WIP**************************************************//
+          digitalWrite(LEDR, LOW);
+        } else {                      // turn on sensor
+          digitalWrite(LEDR, HIGH);
+        }
+      }
+
+    }
+
+  } // end of loop
 }
+
 
 
 /****************************************************************************************************************************
 Name: setup.
+Interrupt: No.
 Description: Start of program. Runs once.
-Parameters:
+Parameters/Variables:
   none.
 Return: void.
+Errors: none.
 *****************************************************************************************************************************/
 void setup() {
+  /// Initialize the PMW3360 sensor
+  if(!sensor.begin(NCS, 1000))   // Arduino will get stuck in infinte loop in case of initialization failure
+    while (1);
+  currentCPI = 1000;
+
   // Enable the pull-ups for all pushbuttons and switches
   pinMode(LEFT, INPUT_PULLUP);
   pinMode(RIGHT, INPUT_PULLUP);
@@ -133,29 +177,38 @@ void setup() {
   pinMode(NEXT, INPUT_PULLUP);
   pinMode(SPEED, INPUT_PULLUP);
   pinMode(POW, INPUT_PULLUP);
-  pinMode(RGB_TOGGLE, INPUT_PULLUP);
   pinMode(MODE_CHANGE, INPUT_PULLUP);
 
+  /// Initialize rotary encoder
   // Enable pull-ups for rotary encoder
   pinMode(MIDDLE, INPUT_PULLUP);
   pinMode(ROT_CLK, INPUT_PULLUP);
   pinMode(ROT_DT, INPUT_PULLUP);
-
-  // Set interrupts for rotary encoder
   attachInterrupt(digitalPinToInterrupt(ROT_DT), ISR_rotaryEncoder, FALLING);
 
-  // Read initial states
-  statePOW = digitalRead(POW);
-  stateRGB = digitalRead(RGB_TOGGLE);
+  // Set RGB as output
+  pinMode(LEDR, OUTPUT);
+  last_statePOW = digitalRead(POW);
+  if (last_statePOW == HIGH)
+    digitalWrite(LEDR, HIGH);
 }
 
 
-// ISR to handle the interrupts for CLK and DT
+/****************************************************************************************************************************
+Name: ISR_rotaryEncoder
+Interrupt: Yes.
+Description: Determine if the rotary encoder rotated clockwise or counter-clockwise.
+Parameters/Variables:
+  scroll_v
+    * Type: volatile int
+    * Desc: Will change to 1 for clockwise rotation, and to -1 for counter-clockwise rotation.
+Return: void.
+Errors: none.
+*****************************************************************************************************************************/
 void ISR_rotaryEncoder() {
   // Process pin states for CLK and DT
-  if (digitalRead(ROT_CLK) == LOW)    // clockwise = scroll down
+  if (digitalRead(ROT_CLK) == LOW)
     scroll_v = 1;
-  else                                // counterclockwise = scroll up
+  else
     scroll_v = -1;
-
 }
